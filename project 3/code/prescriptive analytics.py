@@ -106,3 +106,69 @@ df["campaign_cost"] = df["ins_premium"]  # simplifying cost-proxy assumption, st
 total_budget = 0.30 * df["campaign_cost"].sum()
 print(f"Total cost to fund every state fully: {df['campaign_cost'].sum():,.0f}")
 print(f"Available budget (30% of that):       {total_budget:,.0f}")
+
+n = len(df)
+c = -df["actionable_risk_score"].values
+A_ub = [df["campaign_cost"].values]
+b_ub = [total_budget]
+bounds = [(0, 1)] * n
+
+lp_result = linprog(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+df["funding_fraction_LP"] = lp_result.x
+print(f"\nLP solver status: {lp_result.message}")
+print(f"Optimal total expected benefit: {-lp_result.fun:.2f}")
+
+df["benefit_per_dollar"] = df["actionable_risk_score"] / df["campaign_cost"]
+greedy_order = df.sort_values("benefit_per_dollar", ascending=False).copy()
+remaining_budget = total_budget
+greedy_fraction = pd.Series(0.0, index=greedy_order.index)
+for idx, row in greedy_order.iterrows():
+    if remaining_budget <= 0:
+        break
+    take_cost = min(row["campaign_cost"], remaining_budget)
+    greedy_fraction[idx] = take_cost / row["campaign_cost"]
+    remaining_budget -= take_cost
+df["funding_fraction_greedy"] = greedy_fraction
+agreement = np.allclose(df["funding_fraction_LP"], df["funding_fraction_greedy"], atol=1e-4)
+print(f"Greedy heuristic matches LP solution: {agreement}")
+
+recommendation = df[["abbrev", "region", "total", "actionable_risk_score", "campaign_cost",
+                     "benefit_per_dollar", "funding_fraction_LP"]].sort_values(
+    "funding_fraction_LP", ascending=False
+)
+fully_funded = recommendation[recommendation["funding_fraction_LP"] > 0.999]
+partially_funded = recommendation[(recommendation["funding_fraction_LP"] > 0.001) &
+                                   (recommendation["funding_fraction_LP"] <= 0.999)]
+not_funded = recommendation[recommendation["funding_fraction_LP"] <= 0.001]
+
+print(f"Fully funded states ({len(fully_funded)}): {list(fully_funded['abbrev'])}")
+print(f"Partially funded state ({len(partially_funded)}): {list(partially_funded['abbrev'])}")
+print(f"Not funded this round ({len(not_funded)} states)")
+recommendation.head(15)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+plot_df = recommendation.head(15).iloc[::-1]
+colors = ["#55A868" if f > 0.999 else ("#DD8452" if f > 0.001 else "#C44E52")
+          for f in plot_df["funding_fraction_LP"]]
+axes[0].barh(plot_df["abbrev"], plot_df["funding_fraction_LP"], color=colors)
+axes[0].set_title("Prescribed Funding Fraction — Top 15 States")
+axes[0].set_xlabel("Fraction of full funding")
+axes[0].set_xlim(0, 1.05)
+
+axes[1].scatter(df["campaign_cost"], df["actionable_risk_score"],
+                 c=df["funding_fraction_LP"], cmap="RdYlGn", s=60, edgecolor="k", linewidth=0.3)
+sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=plt.Normalize(0, 1))
+plt.colorbar(sm, ax=axes[1], label="Funding fraction")
+axes[1].set_xlabel("Campaign cost (insurance-premium proxy)")
+axes[1].set_ylabel("Actionable risk score")
+axes[1].set_title("Cost vs. Benefit, colored by Funding Decision")
+
+plt.tight_layout()
+plt.savefig("../outputs/prescriptive_allocation.png", bbox_inches="tight")
+plt.show()
+print("Saved prescriptive_allocation.png")
+
+recommendation.to_csv("../outputs/budget_allocation_recommendation.csv", index=False)
+print("Saved outputs/budget_allocation_recommendation.csv")
+print("\nProject 3 complete.")
